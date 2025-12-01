@@ -1,0 +1,1022 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Cyber Runner</title>
+    
+    <style>
+        body { 
+            margin: 0; 
+            overflow: hidden; 
+            background-color: #000; 
+            touch-action: none; 
+            color: white;
+            font-family: monospace;
+        }
+
+        #root { 
+            width: 100vw; 
+            height: 100vh; 
+        }
+
+        /* Pulse Animation for UI elements */
+        @keyframes pulse { 
+            0% { transform: scale(1) rotate(-5deg); } 
+            50% { transform: scale(1.1) rotate(-5deg); } 
+            100% { transform: scale(1) rotate(-5deg); } 
+        }
+    </style>
+    
+    <!-- Import Map -->
+    <script type="importmap">
+        {
+            "imports": {
+                "react": "https://esm.sh/react@18.2.0",
+                "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+                "three": "https://esm.sh/three@0.160.0"
+            }
+        }
+    </script>
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+        import React, { useEffect, useRef, useState } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import * as THREE from 'three';
+
+        function TempleRunner() {
+            const mountRef = useRef(null);
+            
+            // React State for UI
+            const [uiState, setUiState] = useState({
+                score: 0,
+                coins: 0,
+                multiplier: 1,
+                gameOver: false,
+                gameStarted: false,
+                powerUp: null,
+                zone: 'NEON CITY'
+            });
+
+            // Audio Context Ref
+            const audioCtxRef = useRef(null);
+
+            // Game State Ref
+            const gameState = useRef({
+                active: false,
+                speed: 0,
+                baseSpeed: 0.4,
+                distance: 0,
+                score: 0,
+                coinCount: 0,
+                lane: 1, 
+                targetLane: 1,
+                isJumping: false,
+                isSliding: false,
+                velocityY: 0,
+                jumpForce: 0.35,
+                gravity: 0.02,
+                comboTimer: 0,
+                comboMultiplier: 1,
+                powerUpTime: 0,
+                activePowerUp: null,
+                invincible: false,
+                zoneIndex: 0,
+                nextZoneDist: 500,
+                cooldown: 0
+            });
+
+            // Zone Definitions (Tracks)
+            const ZONES = [
+                { name: 'NEON CITY', fog: 0x1a0b2e, floor: 0x1a1a1a, grid: 0xff00ff, sky: [0xffcc00, 0xff00ff] },
+                { name: 'RED ALERT', fog: 0x2e0b0b, floor: 0x221111, grid: 0xff0000, sky: [0xff0000, 0x330000] },
+                { name: 'THE MATRIX', fog: 0x001a00, floor: 0x001100, grid: 0x00ff00, sky: [0x00ff00, 0x003300] },
+                { name: 'ICE CORE',   fog: 0x0b1a2e, floor: 0x111a22, grid: 0x00ffff, sky: [0x00ffff, 0xffffff] }
+            ];
+
+            // References
+            const sceneRef = useRef(null);
+            const playerRef = useRef(null);
+            const chaserRef = useRef(null); 
+            const objectsRef = useRef({
+                obstacles: [],
+                coins: [],
+                powerUps: [],
+                projectiles: [], 
+                explosions: [],  
+                pathSegments: []
+            });
+
+            // --- AUDIO SYSTEM ---
+            const initAudio = () => {
+                if (!audioCtxRef.current) {
+                    audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                if (audioCtxRef.current.state === 'suspended') {
+                    audioCtxRef.current.resume();
+                }
+            };
+
+            const playSound = (type) => {
+                if (!audioCtxRef.current) return;
+                const ctx = audioCtxRef.current;
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+
+                const now = ctx.currentTime;
+
+                if (type === 'jump') {
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(300, now);
+                    osc.frequency.linearRampToValueAtTime(600, now + 0.1);
+                    gain.gain.setValueAtTime(0.3, now);
+                    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+                    osc.start(now);
+                    osc.stop(now + 0.1);
+                } 
+                else if (type === 'slide') {
+                    osc.type = 'triangle';
+                    osc.frequency.setValueAtTime(200, now);
+                    osc.frequency.linearRampToValueAtTime(100, now + 0.2);
+                    gain.gain.setValueAtTime(0.3, now);
+                    gain.gain.linearRampToValueAtTime(0.01, now + 0.2);
+                    osc.start(now);
+                    osc.stop(now + 0.2);
+                }
+                else if (type === 'shoot') {
+                    osc.type = 'square';
+                    osc.frequency.setValueAtTime(800, now);
+                    osc.frequency.exponentialRampToValueAtTime(100, now + 0.15);
+                    gain.gain.setValueAtTime(0.2, now);
+                    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+                    osc.start(now);
+                    osc.stop(now + 0.15);
+                }
+                else if (type === 'coin') {
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(1200, now);
+                    osc.frequency.setValueAtTime(1600, now + 0.05);
+                    gain.gain.setValueAtTime(0.2, now);
+                    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+                    osc.start(now);
+                    osc.stop(now + 0.1);
+                }
+                else if (type === 'explosion') {
+                    const bufferSize = ctx.sampleRate * 0.5;
+                    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+                    const data = buffer.getChannelData(0);
+                    for (let i = 0; i < bufferSize; i++) {
+                        data[i] = Math.random() * 2 - 1;
+                    }
+                    const noise = ctx.createBufferSource();
+                    noise.buffer = buffer;
+                    const filter = ctx.createBiquadFilter();
+                    filter.type = 'lowpass';
+                    filter.frequency.value = 1000;
+                    
+                    noise.connect(filter);
+                    filter.connect(gain);
+                    gain.connect(ctx.destination);
+                    
+                    gain.gain.setValueAtTime(0.5, now);
+                    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
+                    noise.start(now);
+                }
+                else if (type === 'powerup') {
+                    osc.type = 'triangle';
+                    osc.frequency.setValueAtTime(400, now);
+                    osc.frequency.setValueAtTime(600, now + 0.1);
+                    osc.frequency.setValueAtTime(800, now + 0.2);
+                    gain.gain.setValueAtTime(0.3, now);
+                    gain.gain.linearRampToValueAtTime(0.01, now + 0.4);
+                    osc.start(now);
+                    osc.stop(now + 0.4);
+                }
+                else if (type === 'gameover') {
+                    osc.type = 'sawtooth';
+                    osc.frequency.setValueAtTime(300, now);
+                    osc.frequency.linearRampToValueAtTime(50, now + 1);
+                    gain.gain.setValueAtTime(0.5, now);
+                    gain.gain.linearRampToValueAtTime(0.01, now + 1);
+                    osc.start(now);
+                    osc.stop(now + 1);
+                }
+            };
+
+            useEffect(() => {
+                if (!mountRef.current) return;
+
+                // --- 1. SETUP ---
+                const width = window.innerWidth;
+                const height = window.innerHeight;
+
+                const scene = new THREE.Scene();
+                sceneRef.current = scene;
+                const fogColor = new THREE.Color(ZONES[0].fog);
+                scene.background = fogColor;
+                scene.fog = new THREE.Fog(fogColor, 20, 90);
+
+                const camera = new THREE.PerspectiveCamera(80, width / height, 0.1, 150);
+                camera.position.set(0, 3.5, 6.5); 
+                camera.lookAt(0, 1, -20);
+
+                const renderer = new THREE.WebGLRenderer({ 
+                    antialias: false,
+                    powerPreference: "high-performance",
+                    stencil: false,
+                    depth: true
+                });
+                renderer.setSize(width, height);
+                renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+                
+                renderer.shadowMap.enabled = true;
+                renderer.shadowMap.type = THREE.BasicShadowMap;
+                renderer.toneMapping = THREE.ACESFilmicToneMapping; 
+                renderer.toneMappingExposure = 1.3;
+                mountRef.current.appendChild(renderer.domElement);
+
+                // --- 2. MATERIALS ---
+                const materials = {
+                    player: new THREE.MeshStandardMaterial({ color: 0x00aaff, emissive: 0x0044aa, roughness: 0.2, metalness: 0.8 }),
+                    playerInvincible: new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffffff, roughness: 0 }),
+                    chaserArmor: new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.4, metalness: 0.8 }), 
+                    chaserDetail: new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.5, metalness: 0.5 }),
+                    chaserGlow: new THREE.MeshBasicMaterial({ color: 0xff0000 }), 
+                    floor: new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.1, metalness: 0.4 }),
+                    gridLine: new THREE.MeshBasicMaterial({ color: 0xff00ff, transparent: true, opacity: 0.6 }),
+                    pillarDark: new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.2 }),
+                    pillarNeon: new THREE.MeshBasicMaterial({ color: 0x00ffff }), 
+                    laserBase: new THREE.MeshStandardMaterial({ color: 0x444444 }),
+                    laserBeam: new THREE.MeshBasicMaterial({ color: 0xff0033 }), 
+                    droneBody: new THREE.MeshStandardMaterial({ color: 0x333333 }),
+                    droneRing: new THREE.MeshBasicMaterial({ color: 0xffaa00 }),
+                    mineBody: new THREE.MeshStandardMaterial({ color: 0x222222, metalness: 0.8, roughness: 0.4 }),
+                    mineSpike: new THREE.MeshBasicMaterial({ color: 0xff3300 }),
+                    wallBarrier: new THREE.MeshStandardMaterial({ color: 0x101010, metalness: 0.9, roughness: 0.1, opacity: 0.9, transparent: true }),
+                    wallHolo: new THREE.MeshBasicMaterial({ color: 0x00ff88, wireframe: true }),
+                    coin: new THREE.MeshStandardMaterial({ color: 0xffd700, metalness: 1, roughness: 0.1, emissive: 0x443300 }),
+                    pupMagnet: new THREE.MeshBasicMaterial({ color: 0xff00ff }),
+                    pupShield: new THREE.MeshBasicMaterial({ color: 0x00ffff }),
+                    pupBoost: new THREE.MeshBasicMaterial({ color: 0xffff00 }),
+                    laserShot: new THREE.MeshBasicMaterial({ color: 0x00ffcc }),
+                    explosion: new THREE.MeshBasicMaterial({ color: 0xffaa00, transparent: true, opacity: 1 }),
+                    warpGate: new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.3, side: THREE.DoubleSide })
+                };
+
+                const geometries = {
+                    box: new THREE.BoxGeometry(1, 1, 1),
+                    coin: new THREE.CylinderGeometry(0.4, 0.4, 0.1, 8),
+                    path: new THREE.PlaneGeometry(8, 20),
+                    pillar: new THREE.BoxGeometry(1.5, 8, 1.5),
+                    laserPost: new THREE.BoxGeometry(0.5, 1.5, 0.5),
+                    laserBeam: new THREE.CylinderGeometry(0.08, 0.08, 2.4, 6),
+                    torus: new THREE.TorusGeometry(0.8, 0.15, 6, 12),
+                    sphere: new THREE.SphereGeometry(0.5, 12, 12),
+                    mine: new THREE.IcosahedronGeometry(0.5, 0), 
+                    wall: new THREE.BoxGeometry(2.4, 3, 0.5),
+                    laserBolt: new THREE.CylinderGeometry(0.05, 0.05, 1.5, 6),
+                    gate: new THREE.RingGeometry(3, 3.5, 32),
+                    chest: new THREE.BoxGeometry(1.0, 0.7, 0.6),
+                    abs: new THREE.BoxGeometry(0.6, 0.5, 0.4),
+                    limb: new THREE.BoxGeometry(0.3, 0.9, 0.3),
+                    pauldron: new THREE.BoxGeometry(0.5, 0.5, 0.5),
+                    head: new THREE.BoxGeometry(0.4, 0.5, 0.5),
+                    visor: new THREE.BoxGeometry(0.42, 0.15, 0.3),
+                };
+
+                // --- 3. LIGHTING ---
+                const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+                scene.add(ambientLight);
+
+                const dirLight = new THREE.DirectionalLight(0xffaaff, 1.2);
+                dirLight.position.set(10, 20, 10);
+                dirLight.castShadow = true;
+                dirLight.shadow.mapSize.width = 512;
+                dirLight.shadow.mapSize.height = 512;
+                dirLight.shadow.camera.far = 50;
+                scene.add(dirLight);
+
+                const sunGroup = new THREE.Group();
+                const sunGeo = new THREE.CircleGeometry(30, 32);
+                const canvas = document.createElement('canvas');
+                canvas.width = 64; canvas.height = 64;
+                const ctx = canvas.getContext('2d');
+                const updateSunTexture = (colors) => {
+                    const grd = ctx.createLinearGradient(0, 0, 0, 64);
+                    grd.addColorStop(0, '#' + new THREE.Color(colors[0]).getHexString());
+                    grd.addColorStop(1, '#' + new THREE.Color(colors[1]).getHexString());
+                    ctx.fillStyle = grd;
+                    ctx.fillRect(0, 0, 64, 64);
+                    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+                    for(let y=32; y<64; y+=6) ctx.fillRect(0, y, 64, 2);
+                };
+                updateSunTexture(ZONES[0].sky);
+                
+                const sunTex = new THREE.CanvasTexture(canvas);
+                const sunMat = new THREE.MeshBasicMaterial({ 
+                    map: sunTex, 
+                    fog: false,
+                    transparent: true
+                });
+                const sunMesh = new THREE.Mesh(sunGeo, sunMat);
+                sunGroup.position.set(0, 10, -90);
+                scene.add(sunGroup);
+
+                // --- 4. PLAYER & WEAPON ---
+                const playerGroup = new THREE.Group();
+                playerRef.current = playerGroup;
+
+                const torso = new THREE.Mesh(geometries.box, materials.player);
+                torso.scale.set(0.6, 0.8, 0.4);
+                torso.position.y = 0.8;
+                torso.castShadow = true;
+                playerGroup.add(torso);
+                
+                const head = new THREE.Mesh(geometries.box, materials.player);
+                head.scale.set(0.35, 0.35, 0.35);
+                head.position.y = 1.4;
+                playerGroup.add(head);
+
+                const blaster = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.15, 0.4), new THREE.MeshBasicMaterial({ color: 0x333333 }));
+                blaster.position.set(0.45, 0.8, 0.2);
+                playerGroup.add(blaster);
+                const blasterTip = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 0.1), new THREE.MeshBasicMaterial({ color: 0x00ffcc }));
+                blasterTip.position.set(0, 0, 0.25);
+                blaster.add(blasterTip);
+
+                const trailGeo = new THREE.PlaneGeometry(0.4, 3);
+                const trailMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0.5, side: THREE.DoubleSide });
+                const trail = new THREE.Mesh(trailGeo, trailMat);
+                trail.rotation.x = Math.PI / 2;
+                trail.position.set(0, 0.5, 2);
+                playerGroup.add(trail);
+
+                scene.add(playerGroup);
+
+                // --- 4.5 CHASER ---
+                const chaserGroup = new THREE.Group();
+                chaserRef.current = chaserGroup;
+                const chest = new THREE.Mesh(geometries.chest, materials.chaserArmor); chest.position.y = 1.3; chaserGroup.add(chest);
+                const core = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 0.1), materials.chaserGlow); core.position.set(0, 1.3, -0.26); chaserGroup.add(core);
+                const abdomen = new THREE.Mesh(geometries.abs, materials.chaserDetail); abdomen.position.y = 0.85; chaserGroup.add(abdomen);
+                const cHead = new THREE.Mesh(geometries.head, materials.chaserArmor); cHead.position.y = 1.8; chaserGroup.add(cHead);
+                const visor = new THREE.Mesh(geometries.visor, materials.chaserGlow); visor.position.set(0, 1.8, -0.15); chaserGroup.add(visor);
+                const lPauldron = new THREE.Mesh(geometries.pauldron, materials.chaserArmor); lPauldron.position.set(-0.7, 1.4, 0); chaserGroup.add(lPauldron);
+                const rPauldron = new THREE.Mesh(geometries.pauldron, materials.chaserArmor); rPauldron.position.set(0.7, 1.4, 0); chaserGroup.add(rPauldron);
+                const lArm = new THREE.Mesh(geometries.limb, materials.chaserDetail); lArm.position.set(-0.7, 0.9, 0); chaserGroup.add(lArm);
+                const rArm = new THREE.Mesh(geometries.limb, materials.chaserDetail); rArm.position.set(0.7, 0.9, 0); chaserGroup.add(rArm);
+                const lLeg = new THREE.Mesh(geometries.limb, materials.chaserArmor); lLeg.position.set(-0.35, 0.45, 0); chaserGroup.add(lLeg);
+                const rLeg = new THREE.Mesh(geometries.limb, materials.chaserArmor); rLeg.position.set(0.35, 0.45, 0); chaserGroup.add(rLeg);
+                chaserGroup.position.set(0, 0, 2.0);
+                scene.add(chaserGroup);
+
+                // --- 5. ENVIRONMENT ---
+                const gridHelper = new THREE.GridHelper(8, 4, ZONES[0].grid, ZONES[0].grid);
+                gridHelper.position.y = 0.05;
+                
+                const createPathSegment = (zPos) => {
+                    const group = new THREE.Group();
+                    group.position.z = zPos;
+
+                    const floor = new THREE.Mesh(geometries.path, materials.floor);
+                    floor.rotation.x = -Math.PI / 2;
+                    floor.receiveShadow = true;
+                    group.add(floor);
+
+                    const grid = gridHelper.clone();
+                    group.userData.grid = grid;
+                    group.add(grid);
+
+                    const addPillar = (x) => {
+                        const pillar = new THREE.Mesh(geometries.pillar, materials.pillarDark);
+                        pillar.position.set(x, 4, 0);
+                        group.add(pillar);
+
+                        const strip = new THREE.Mesh(new THREE.BoxGeometry(0.2, 7.8, 0.2), materials.pillarNeon);
+                        strip.position.set(x > 0 ? x - 0.7 : x + 0.7, 4, 0.7);
+                        group.userData.neon = strip;
+                        group.add(strip);
+                    };
+                    addPillar(-6);
+                    addPillar(6);
+
+                    scene.add(group);
+                    return group;
+                };
+
+                for (let i = 0; i < 8; i++) {
+                    objectsRef.current.pathSegments.push(createPathSegment(-i * 20));
+                }
+
+                // --- 6. WEAPONS & FX ---
+                const fireWeapon = () => {
+                    if (!gameState.current.active || gameState.current.cooldown > 0) return;
+                    
+                    playSound('shoot');
+                    gameState.current.cooldown = 15;
+
+                    const laser = new THREE.Mesh(geometries.laserBolt, materials.laserShot);
+                    laser.rotation.x = Math.PI / 2;
+                    laser.position.copy(playerGroup.position);
+                    laser.position.y += 0.8;
+                    laser.position.x += 0.45;
+                    laser.position.z -= 1.0;
+                    
+                    const light = new THREE.PointLight(0x00ffcc, 1, 5);
+                    laser.add(light);
+                    
+                    scene.add(laser);
+                    objectsRef.current.projectiles.push(laser);
+                };
+
+                const spawnExplosion = (pos, color) => {
+                    playSound('explosion');
+                    const boom = new THREE.Mesh(geometries.sphere, materials.explosion.clone());
+                    boom.material.color.setHex(color);
+                    boom.position.copy(pos);
+                    boom.scale.set(0.1, 0.1, 0.1);
+                    boom.userData = { scaleRate: 0.2, life: 1.0 };
+                    scene.add(boom);
+                    objectsRef.current.explosions.push(boom);
+                };
+
+                // --- 7. SPAWNING ---
+                const spawnObstacle = (z, zoneIdx) => {
+                    const rand = Math.random();
+                    const laneIdx = Math.floor(Math.random() * 3);
+                    const x = [-2.5, 0, 2.5][laneIdx];
+                    
+                    let meshGroup = new THREE.Group();
+                    meshGroup.position.set(x, 0, z);
+
+                    if (rand < 0.25) {
+                        const postL = new THREE.Mesh(geometries.laserPost, materials.laserBase); postL.position.set(-1, 0.75, 0); meshGroup.add(postL);
+                        const postR = new THREE.Mesh(geometries.laserPost, materials.laserBase); postR.position.set(1, 0.75, 0); meshGroup.add(postR);
+                        const beam = new THREE.Mesh(geometries.laserBeam, materials.laserBeam); beam.rotation.z = Math.PI / 2; beam.position.y = 0.75; meshGroup.add(beam);
+                        meshGroup.userData = { type: 'low', hp: 1 };
+                    } 
+                    else if (rand < 0.5) {
+                        const ring = new THREE.Mesh(geometries.torus, materials.droneRing); ring.position.y = 2.2; meshGroup.add(ring);
+                        const core = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.4), materials.droneBody); core.position.y = 2.2; meshGroup.add(core);
+                        meshGroup.userData = { type: 'high', hp: 1, rotating: true };
+                    } 
+                    else if (rand < 0.75) {
+                        const body = new THREE.Mesh(geometries.mine, materials.mineBody);
+                        body.position.y = 0.5;
+                        const spike1 = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.1, 0.1), materials.mineSpike); body.add(spike1);
+                        const spike2 = new THREE.Mesh(new THREE.BoxGeometry(0.1, 1.2, 0.1), materials.mineSpike); body.add(spike2);
+                        const spike3 = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 1.2), materials.mineSpike); body.add(spike3);
+                        meshGroup.add(body);
+                        meshGroup.userData = { type: 'mine', hp: 1, rolling: true };
+                    }
+                    else {
+                        const wall = new THREE.Mesh(geometries.wall, materials.wallBarrier);
+                        wall.position.y = 1.5;
+                        meshGroup.add(wall);
+                        const holo = new THREE.Mesh(new THREE.BoxGeometry(2.2, 2.8, 0.6), materials.wallHolo);
+                        holo.position.y = 1.5;
+                        meshGroup.add(holo);
+                        meshGroup.userData = { type: 'wall', hp: 5 };
+                    }
+
+                    meshGroup.userData.active = true;
+                    scene.add(meshGroup);
+                    objectsRef.current.obstacles.push(meshGroup);
+                };
+
+                const spawnGate = (z) => {
+                    const gate = new THREE.Mesh(geometries.gate, materials.warpGate);
+                    gate.position.set(0, 3, z);
+                    gate.lookAt(0, 3, 0); 
+                    gate.userData = { type: 'gate' };
+                    
+                    const ring = new THREE.Points(geometries.torus, new THREE.PointsMaterial({ color: 0xffffff, size: 0.2 }));
+                    ring.scale.set(4, 4, 1);
+                    gate.add(ring);
+                    
+                    scene.add(gate);
+                    objectsRef.current.obstacles.push(gate);
+                };
+
+                const spawnCoins = (z) => {
+                    const laneIdx = Math.floor(Math.random() * 3);
+                    const x = [-2.5, 0, 2.5][laneIdx];
+                    for(let i=0; i<4; i++) { 
+                        const mesh = new THREE.Mesh(geometries.coin, materials.coin);
+                        mesh.rotation.z = Math.PI / 2;
+                        mesh.position.set(x, 0.6, z - (i * 1.5));
+                        mesh.userData = { active: true, value: 10 };
+                        scene.add(mesh);
+                        objectsRef.current.coins.push(mesh);
+                    }
+                };
+
+                const spawnPowerUp = (z) => {
+                    const types = ['magnet', 'shield', 'boost'];
+                    const type = types[Math.floor(Math.random() * types.length)];
+                    const laneIdx = Math.floor(Math.random() * 3);
+                    const mat = type === 'magnet' ? materials.pupMagnet : type === 'shield' ? materials.pupShield : materials.pupBoost;
+                    const mesh = new THREE.Mesh(geometries.sphere, mat);
+                    mesh.position.set([-2.5, 0, 2.5][laneIdx], 1, z);
+                    
+                    const halo = new THREE.Mesh(geometries.torus, mat);
+                    halo.scale.set(0.7, 0.7, 0.7);
+                    mesh.add(halo);
+
+                    mesh.userData = { type: type, active: true };
+                    scene.add(mesh);
+                    objectsRef.current.powerUps.push(mesh);
+                };
+
+                // --- 8. INPUT HANDLING ---
+                const handleInput = (action) => {
+                    initAudio();
+                    
+                    if (!gameState.current.active) return;
+                    const s = gameState.current;
+
+                    if (action === 'left' && s.targetLane > 0) s.targetLane--;
+                    if (action === 'right' && s.targetLane < 2) s.targetLane++;
+                    if (action === 'jump' && !s.isJumping && !s.isSliding) {
+                        s.isJumping = true;
+                        s.velocityY = s.jumpForce;
+                        playSound('jump');
+                    }
+                    if (action === 'slide' && !s.isSliding && !s.isJumping) {
+                        s.isSliding = true;
+                        playSound('slide');
+                        playerGroup.scale.set(1.2, 0.5, 1.2); 
+                        playerGroup.position.y = 0.3;
+                        setTimeout(() => {
+                            s.isSliding = false;
+                            if(!s.active) return;
+                            playerGroup.scale.set(1, 1, 1);
+                        }, 800);
+                    }
+                    if (action === 'shoot') {
+                        fireWeapon();
+                    }
+                };
+
+                const onKeyDown = (e) => {
+                    initAudio();
+                    
+                    if (e.code === 'Space') {
+                        if (!gameState.current.active && !uiState.gameStarted) startGame();
+                        else if (uiState.gameOver) resetGame();
+                        else handleInput('jump');
+                    }
+                    switch(e.key) {
+                        case 'ArrowLeft': case 'a': handleInput('left'); break;
+                        case 'ArrowRight': case 'd': handleInput('right'); break;
+                        case 'ArrowUp': case 'w': handleInput('jump'); break;
+                        case 'ArrowDown': case 's': handleInput('slide'); break;
+                        case 'f': case 'k': case 'Enter': handleInput('shoot'); break;
+                    }
+                };
+
+                let touchStart = null;
+                window.addEventListener('touchstart', (e) => {
+                    touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY, time: Date.now() };
+                });
+                window.addEventListener('touchend', (e) => {
+                    if (!touchStart || !gameState.current.active) return;
+                    const dx = e.changedTouches[0].clientX - touchStart.x;
+                    const dy = e.changedTouches[0].clientY - touchStart.y;
+                    const dt = Date.now() - touchStart.time;
+
+                    if (dt < 150 && Math.abs(dx) < 10 && Math.abs(dy) < 10) {
+                        handleInput('shoot'); 
+                    } else {
+                        if (Math.abs(dx) > Math.abs(dy)) handleInput(dx > 0 ? 'right' : 'left');
+                        else handleInput(dy > 0 ? 'slide' : 'jump');
+                    }
+                    touchStart = null;
+                });
+                window.addEventListener('keydown', onKeyDown);
+
+                // --- 9. ANIMATION LOOP ---
+                const resetGame = () => {
+                    initAudio();
+                    objectsRef.current.obstacles.forEach(o => scene.remove(o));
+                    objectsRef.current.coins.forEach(o => scene.remove(o));
+                    objectsRef.current.powerUps.forEach(o => scene.remove(o));
+                    objectsRef.current.projectiles.forEach(o => scene.remove(o));
+                    objectsRef.current.explosions.forEach(o => scene.remove(o));
+                    objectsRef.current.obstacles = [];
+                    objectsRef.current.coins = [];
+                    objectsRef.current.powerUps = [];
+                    objectsRef.current.projectiles = [];
+                    objectsRef.current.explosions = [];
+
+                    gameState.current = {
+                        active: true,
+                        speed: 0.5,
+                        baseSpeed: 0.4,
+                        distance: 0,
+                        score: 0,
+                        coinCount: 0,
+                        lane: 1,
+                        targetLane: 1,
+                        isJumping: false,
+                        isSliding: false,
+                        velocityY: 0,
+                        jumpForce: 0.35,
+                        gravity: 0.02,
+                        comboTimer: 0,
+                        comboMultiplier: 1,
+                        powerUpTime: 0,
+                        activePowerUp: null,
+                        invincible: false,
+                        zoneIndex: 0,
+                        nextZoneDist: 500,
+                        cooldown: 0
+                    };
+                    
+                    const zone = ZONES[0];
+                    scene.fog.color.setHex(zone.fog);
+                    scene.background.setHex(zone.fog);
+                    gridHelper.material.color.setHex(zone.grid);
+                    updateSunTexture(zone.sky);
+                    sunMat.map.needsUpdate = true;
+                    
+                    playerGroup.position.set(0, 0, 0);
+                    playerGroup.children[0].material = materials.player;
+                    chaserGroup.position.set(0, 0, 2.0);
+                    
+                    setUiState({ score: 0, coins: 0, multiplier: 1, gameOver: false, gameStarted: true, powerUp: null, zone: zone.name });
+                };
+
+                const startGame = () => resetGame();
+                let frameId;
+                let spawnTimer = 0;
+
+                const animate = () => {
+                    frameId = requestAnimationFrame(animate);
+                    const state = gameState.current;
+
+                    if (state.active) {
+                        const shake = state.speed > 0.8 ? (Math.random() - 0.5) * 0.05 : 0;
+                        camera.position.x = THREE.MathUtils.lerp(camera.position.x, (playerGroup.position.x * 0.4) + shake, 0.1);
+                        sunGroup.rotation.z += 0.002;
+                    }
+
+                    if (!state.active) {
+                        renderer.render(scene, camera);
+                        return;
+                    }
+
+                    // --- GAMEPLAY UPDATE ---
+                    state.baseSpeed = 0.4 + (state.distance * 0.0001); 
+                    const targetSpeed = state.activePowerUp === 'boost' ? state.baseSpeed * 2.5 : state.baseSpeed;
+                    state.speed = THREE.MathUtils.lerp(state.speed, targetSpeed, 0.05);
+                    state.distance += state.speed;
+                    state.cooldown = Math.max(0, state.cooldown - 1);
+
+                    if (state.distance > state.nextZoneDist) {
+                        state.nextZoneDist += 500;
+                        state.zoneIndex = (state.zoneIndex + 1) % ZONES.length;
+                        const newZone = ZONES[state.zoneIndex];
+                        spawnGate(-100);
+                        scene.fog.color.setHex(newZone.fog);
+                        scene.background.setHex(newZone.fog);
+                        gridHelper.material.color.setHex(newZone.grid);
+                        updateSunTexture(newZone.sky);
+                        sunMat.map.needsUpdate = true;
+                        setUiState(prev => ({ ...prev, zone: newZone.name }));
+                    }
+
+                    state.lane = THREE.MathUtils.lerp(state.lane, state.targetLane, 0.2);
+                    playerGroup.position.x = (state.lane - 1) * 2.5;
+                    playerGroup.rotation.z = -(state.lane - state.targetLane) * 0.5;
+
+                    chaserGroup.position.x = THREE.MathUtils.lerp(chaserGroup.position.x, playerGroup.position.x, 0.08);
+                    chaserGroup.position.y = Math.abs(Math.sin(state.distance * 1.5)) * 0.1;
+                    const targetChaserZ = state.activePowerUp === 'boost' ? 12.0 : 2.0; 
+                    chaserGroup.position.z = THREE.MathUtils.lerp(chaserGroup.position.z, targetChaserZ, 0.03);
+                    chaserGroup.rotation.z = (chaserGroup.position.x - playerGroup.position.x) * 0.3;
+                    
+                    const limbTime = state.distance * 2;
+                    if (chaserGroup.children[7]) chaserGroup.children[7].rotation.x = Math.sin(limbTime) * 0.6; 
+                    if (chaserGroup.children[8]) chaserGroup.children[8].rotation.x = Math.cos(limbTime) * 0.6; 
+                    if (chaserGroup.children[9]) chaserGroup.children[9].rotation.x = Math.cos(limbTime) * 0.8; 
+                    if (chaserGroup.children[10]) chaserGroup.children[10].rotation.x = Math.sin(limbTime) * 0.8; 
+
+                    if (state.isJumping) {
+                        playerGroup.position.y += state.velocityY;
+                        state.velocityY -= state.gravity;
+                        if (playerGroup.position.y <= 0) {
+                            playerGroup.position.y = 0;
+                            state.isJumping = false;
+                            state.velocityY = 0;
+                        }
+                    }
+
+                    for (let i = objectsRef.current.projectiles.length - 1; i >= 0; i--) {
+                        const shot = objectsRef.current.projectiles[i];
+                        shot.position.z -= 1.0; 
+                        
+                        let hit = false;
+                        for (let j = objectsRef.current.obstacles.length - 1; j >= 0; j--) {
+                            const ob = objectsRef.current.obstacles[j];
+                            if (!ob.userData.active || ob.userData.type === 'gate') continue;
+
+                            const dx = Math.abs(shot.position.x - ob.position.x);
+                            const dz = Math.abs(shot.position.z - ob.position.z);
+                            
+                            if (dx < 1.0 && dz < 1.0) {
+                                ob.userData.hp -= 1;
+                                hit = true;
+                                spawnExplosion(ob.position, 0x00ffff);
+                                
+                                if (ob.userData.hp <= 0) {
+                                    ob.visible = false;
+                                    ob.userData.active = false;
+                                    state.score += 50;
+                                    spawnExplosion(ob.position, 0xffaa00);
+                                }
+                                break;
+                            }
+                        }
+
+                        if (hit || shot.position.z < -100) {
+                            scene.remove(shot);
+                            objectsRef.current.projectiles.splice(i, 1);
+                        }
+                    }
+
+                    for (let i = objectsRef.current.explosions.length - 1; i >= 0; i--) {
+                        const exp = objectsRef.current.explosions[i];
+                        exp.scale.multiplyScalar(1.2);
+                        exp.material.opacity -= 0.1;
+                        if (exp.material.opacity <= 0) {
+                            scene.remove(exp);
+                            objectsRef.current.explosions.splice(i, 1);
+                        }
+                    }
+
+                    const currentZone = ZONES[state.zoneIndex];
+                    const segLen = 20;
+                    objectsRef.current.pathSegments.forEach(seg => {
+                        seg.position.z += state.speed;
+                        
+                        if (seg.position.z > segLen) {
+                            seg.position.z -= segLen * 8;
+                            if(seg.userData.grid) seg.userData.grid.material.color.setHex(currentZone.grid);
+                            if(seg.userData.neon) seg.userData.neon.material.color.setHex(currentZone.grid); 
+                        }
+                    });
+
+                    spawnTimer += state.speed;
+                    if (spawnTimer > 15) { 
+                        spawnTimer = 0;
+                        const spawnZ = -100;
+                        const rand = Math.random();
+                        if (rand < 0.1) spawnPowerUp(spawnZ);
+                        else if (rand < 0.4) spawnCoins(spawnZ);
+                        else spawnObstacle(spawnZ, state.zoneIndex);
+                    }
+
+                    const checkHit = (pPos, oPos, w, h, d, yOffset=0) => {
+                        return Math.abs(pPos.x - oPos.x) < w && 
+                            Math.abs((pPos.y + yOffset) - oPos.y) < h && 
+                            Math.abs(pPos.z - oPos.z) < d;
+                    };
+
+                    for (let i = objectsRef.current.obstacles.length - 1; i >= 0; i--) {
+                        const ob = objectsRef.current.obstacles[i];
+                        ob.position.z += state.speed;
+
+                        if (ob.userData.type === 'mine' && ob.userData.rolling && ob.children[0]) {
+                            ob.children[0].rotation.x -= 0.1; 
+                        }
+                        if (ob.userData.rotating && ob.children[0]) {
+                            ob.children[0].rotation.z += 0.1;
+                        }
+
+                        if (ob.userData.active) {
+                            if (ob.userData.type === 'gate') {
+                                if (ob.position.z > 5) {
+                                    scene.remove(ob);
+                                    objectsRef.current.obstacles.splice(i, 1);
+                                }
+                                continue;
+                            }
+
+                            let hit = false;
+                            if (ob.userData.type === 'low') {
+                                if (checkHit(playerGroup.position, ob.position, 1, 0.8, 0.5, 0.6) && playerGroup.position.y < 0.5) hit = true;
+                            } else if (ob.userData.type === 'high') {
+                                const pTop = playerGroup.position.y + (state.isSliding ? 0.3 : 1.2);
+                                if (Math.abs(playerGroup.position.z - ob.position.z) < 0.5 && 
+                                    Math.abs(playerGroup.position.x - ob.position.x) < 0.8 && pTop > 1.8) hit = true;
+                            } else if (ob.userData.type === 'wall' || ob.userData.type === 'mine') {
+                                if (checkHit(playerGroup.position, ob.position, 1, 1, 1, 0.5)) hit = true;
+                            }
+
+                            if (hit) {
+                                if (state.invincible) {
+                                    ob.visible = false;
+                                    ob.userData.active = false;
+                                    state.score += 50;
+                                    spawnExplosion(ob.position, 0xffffff);
+                                } else {
+                                    state.active = false;
+                                    playSound('gameover');
+                                    setUiState(prev => ({ ...prev, gameOver: true }));
+                                }
+                            }
+                        }
+                        if (ob.position.z > 5) {
+                            scene.remove(ob);
+                            objectsRef.current.obstacles.splice(i, 1);
+                        }
+                    }
+
+                    const magnetRange = state.activePowerUp === 'magnet' ? 8 : 1.5;
+                    for (let i = objectsRef.current.coins.length - 1; i >= 0; i--) {
+                        const coin = objectsRef.current.coins[i];
+                        coin.position.z += state.speed;
+                        coin.rotation.y += 0.1;
+                        if (coin.userData.active) {
+                            if (state.activePowerUp === 'magnet' && coin.position.z > -30) {
+                                coin.position.x += (playerGroup.position.x - coin.position.x) * 0.2;
+                                coin.position.y += (playerGroup.position.y - coin.position.y) * 0.2;
+                                coin.position.z += (playerGroup.position.z - coin.position.z) * 0.2;
+                            }
+                            if (checkHit(playerGroup.position, coin.position, 1, 1, 1, 0.5)) {
+                                coin.visible = false;
+                                coin.userData.active = false;
+                                state.coinCount++;
+                                state.score += 20 * state.comboMultiplier;
+                                state.comboTimer = 100;
+                                playSound('coin');
+                            }
+                        }
+                        if (coin.position.z > 5) {
+                            scene.remove(coin);
+                            objectsRef.current.coins.splice(i, 1);
+                        }
+                    }
+                    for (let i = objectsRef.current.powerUps.length - 1; i >= 0; i--) {
+                        const pup = objectsRef.current.powerUps[i];
+                        pup.position.z += state.speed;
+                        
+                        if (pup.children[0]) {
+                            pup.children[0].rotation.x += 0.1;
+                        }
+
+                        if (pup.userData.active && checkHit(playerGroup.position, pup.position, 1.2, 1.2, 1.2, 0.5)) {
+                            pup.visible = false;
+                            pup.userData.active = false;
+                            state.activePowerUp = pup.userData.type;
+                            state.powerUpTime = 500;
+                            setUiState(prev => ({ ...prev, powerUp: pup.userData.type }));
+                            playSound('powerup');
+                            if (pup.userData.type === 'shield') {
+                                state.invincible = true;
+                                playerGroup.children[0].material = materials.playerInvincible;
+                            }
+                        }
+                        if (pup.position.z > 5) {
+                            scene.remove(pup);
+                            objectsRef.current.powerUps.splice(i, 1);
+                        }
+                    }
+
+                    state.score += 1;
+                    if (state.comboTimer > 0) state.comboTimer--;
+                    state.comboMultiplier = state.comboTimer > 0 ? Math.min(5, 1 + Math.floor(state.coinCount / 10)) : 1;
+
+                    if (state.activePowerUp) {
+                        state.powerUpTime--;
+                        if (state.powerUpTime <= 0) {
+                            state.activePowerUp = null;
+                            state.invincible = false;
+                            playerGroup.children[0].material = materials.player;
+                            setUiState(prev => ({ ...prev, powerUp: null }));
+                        }
+                    }
+
+                    if (renderer.info.render.frame % 6 === 0) {
+                        setUiState(prev => ({
+                            ...prev,
+                            score: Math.floor(state.score),
+                            coins: state.coinCount,
+                            multiplier: state.comboMultiplier
+                        }));
+                    }
+
+                    renderer.render(scene, camera);
+                };
+                animate();
+
+                const handleResize = () => {
+                    const w = window.innerWidth, h = window.innerHeight;
+                    camera.aspect = w / h;
+                    camera.updateProjectionMatrix();
+                    renderer.setSize(w, h);
+                };
+                window.addEventListener('resize', handleResize);
+
+                return () => {
+                    cancelAnimationFrame(frameId);
+                    window.removeEventListener('keydown', onKeyDown);
+                    window.removeEventListener('resize', handleResize);
+                    if (mountRef.current) mountRef.current.removeChild(renderer.domElement);
+                    Object.values(materials).forEach(m => m.dispose());
+                    Object.values(geometries).forEach(g => g.dispose());
+                    renderer.dispose();
+                    if (audioCtxRef.current) audioCtxRef.current.close();
+                };
+            }, []);
+
+            return (
+                <div style={{ position: 'relative', width: '100vw', height: '100vh', overflow: 'hidden', userSelect: 'none', background: '#000' }}>
+                    <div ref={mountRef} />
+
+                    {/* HUD */}
+                    <div style={{ 
+                        position: 'absolute', top: 20, left: 20, 
+                        padding: '10px 20px', borderRadius: '15px', 
+                        background: 'rgba(0,0,0,0.5)', border: '1px solid #00ffff',
+                        backdropFilter: 'blur(4px)'
+                    }}>
+                        <div style={{ color: '#00ffff', fontSize: '14px', fontFamily: 'monospace' }}>SCORE</div>
+                        <div style={{ color: '#fff', fontSize: '32px', fontFamily: 'Impact, sans-serif' }}>{uiState.score}</div>
+                        <div style={{ color: '#ffd700', fontSize: '20px', fontWeight: 'bold' }}>🪙 {uiState.coins}</div>
+                        <div style={{ color: '#aaa', fontSize: '12px', marginTop: '5px' }}>ZONE: <span style={{color:'#fff'}}>{uiState.zone}</span></div>
+                    </div>
+
+                    {uiState.multiplier > 1 && (
+                        <div style={{ position: 'absolute', top: 140, left: 20, color: '#ff00ff', fontSize: '24px', fontWeight: 'bold', fontFamily: 'sans-serif' }}>
+                            x{uiState.multiplier} COMBO
+                        </div>
+                    )}
+
+                    {/* Shoot Button for Mobile */}
+                    <div style={{
+                        position: 'absolute', bottom: 40, right: 40,
+                        width: '80px', height: '80px', borderRadius: '50%',
+                        background: 'rgba(255, 0, 0, 0.4)', border: '3px solid #ff3333',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        color: '#fff', fontWeight: 'bold', cursor: 'pointer'
+                    }} onClick={() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'f' })) }}>
+                        FIRE
+                    </div>
+
+                    {uiState.powerUp && (
+                        <div style={{ 
+                            position: 'absolute', top: 20, right: 20, 
+                            padding: '10px 20px', background: 'rgba(0,0,0,0.6)', 
+                            border: `2px solid #fff`, borderRadius: '20px',
+                            color: '#fff', fontWeight: 'bold', fontSize: '18px'
+                        }}>
+                            {uiState.powerUp.toUpperCase()} ACTIVE
+                        </div>
+                    )}
+
+                    {/* Menus */}
+                    {(!uiState.gameStarted || uiState.gameOver) && (
+                        <div style={{
+                            position: 'absolute', top: 0, left: 0, width: '100%', height: '100%',
+                            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                            background: 'rgba(0,0,0,0.85)'
+                        }}>
+                            <h1 style={{ fontSize: '60px', color: '#00ffff', fontFamily: 'Impact', margin: '0 0 20px 0', textShadow: '0 0 20px #00ffff' }}>
+                                CYBER RUNNER
+                            </h1>
+                            {uiState.gameOver && <h2 style={{ color: '#ff0055', fontSize: '30px' }}>GAME OVER - SCORE: {uiState.score}</h2>}
+                            
+                            <div style={{ color: '#ccc', margin: '20px', fontFamily: 'monospace', fontSize: '16px' }}>
+                                [A/D] MOVE • [W] JUMP • [S] SLIDE • [F] SHOOT
+                            </div>
+
+                            <button 
+                                onClick={() => window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space' }))}
+                                style={{
+                                    padding: '15px 50px', fontSize: '24px', background: '#00ffff', border: 'none',
+                                    borderRadius: '30px', cursor: 'pointer', fontWeight: 'bold', color: '#000'
+                                }}
+                            >
+                                {uiState.gameOver ? 'RETRY' : 'START'}
+                            </button>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<TempleRunner />);
+    </script>
+</body>
+</html>
